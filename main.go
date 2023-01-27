@@ -3,6 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"livres/db"
+	"strconv"
+
+	//"html/template"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -17,91 +21,145 @@ type Book struct {
 	Image string `json:"img"`
 }
 
-func Add(b Book) {
-	books = append(books, Book{Title: b.Title, Author: b.Author, Year: b.Year})
+type DeleteRequest struct {
+	ID string `json:"id"`
 }
-
-var books []Book
-
-func init() {
-	books = []Book{
-		{ID: "1", Title: "Le Seigneur des Anneaux", Author: "J.R.R. Tolkien", Year: 1954},
-		{ID: "2", Title: "Le Hobbit", Author: "J.R.R. Tolkien", Year: 1937},
-		{ID: "3", Title: "Le Trône de Fer", Author: "George R.R. Martin", Year: 1996},
-		{ID: "4", Image: ""},
-	}
-}
-
-func getBooks(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"data": books})
-}
-
-func getBook(c *gin.Context) {
-	// Récupérez l'ID du livre à partir de la route
-	id := c.Param("id")
-
-	// Recherchez le livre correspondant dans la liste
-	for _, book := range books {
-		if book.ID == id {
-			c.JSON(http.StatusOK, gin.H{"data": book})
-			return
-		}
-	}
-
-	// Si le livre n'est pas trouvé, renvoyez un code d'erreur 404
-	c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
-}
-
-func Delete(id string) error {
-	for i, b := range books {
-		if b.ID == id {
-			books[i] = books[len(books)-1]
-			books = books[:len(books)-1]
-			return nil
-		}
-	}
-	return fmt.Errorf("Book with ID %d not found", id)
-}
-
-//var templates = template.Must(template.ParseFiles("index.html"))
 
 func main() {
 	r := gin.Default()
+	r.LoadHTMLGlob("./html/*.html")
+
+	r.Static("/css", "./assets/css")
+	r.Static("/js", "./assets/js")
+	r.Static("/img", "./assets/img")
+
+	r.Use(func(c *gin.Context) {
+		if c.Request.Method == "OPTIONS" {
+			if c.Request.Method == "OPTIONS" {
+				c.AbortWithStatus(200)
+				return
+			}
+			return
+		}
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "http://127.0.0.1/")
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "http://localhost/")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		c.Next()
+	})
+
+	mongo, cancel := db.Connect()
+	defer cancel()
 
 	r.GET("/livres", func(c *gin.Context) {
-		c.JSON(http.StatusOK, fmt.Sprintf("%v", books))
+		bookList, err := db.GetLivres(c, mongo)
+		if err != nil {
+			c.JSON(http.StatusNotFound, "not found")
+		}
+
+		res, err := json.Marshal(bookList)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, "unable to marshal json")
+		}
+
+		c.JSON(http.StatusOK, fmt.Sprintf("%v", string(res)))
 	})
 
 	r.GET("/livres/:id", func(c *gin.Context) {
-		getBook(c)
+		id, err := c.Params.Get("id")
+		if !err {
+			c.JSON(http.StatusInternalServerError, "got error")
+		}
+		res, got := db.GetLivre(c, mongo, id)
+		if got == false {
+			c.JSON(http.StatusNotFound, "not found")
+			return
+		}
+
+		c.JSON(http.StatusOK, res)
+
 	})
 
 	r.POST("/livres", func(c *gin.Context) {
 		body := c.Request.Body
 
+		fmt.Printf("%v", body)
+
 		var data Book
 		err := json.NewDecoder(body).Decode(&data)
 		if err != nil {
-			panic("marche pas")
+			c.JSON(http.StatusBadRequest, err.Error())
 		}
 
-		Add(data)
-		c.JSON(http.StatusOK, fmt.Sprintf("%v", data.ID))
+		err = db.PostLivre(c, mongo, db.Book{
+			ID:     data.ID,
+			Author: data.Author,
+			Title:  data.Title,
+			Year:   data.Year,
+			Image:  data.Image,
+		})
+		if err != nil {
+			if err.Error() == "already inserted" {
+				c.JSON(http.StatusConflict, err.Error())
+				return
+			}
+		}
+		c.JSON(http.StatusOK, "ok")
+	})
+
+	r.POST("/livres/form", func(c *gin.Context) {
+		query := c.Request.URL.Query()
+
+		id := query.Get("id")
+		title := query.Get("title")
+		author := query.Get("author")
+		year := query.Get("year")
+		img := query.Get("img")
+
+		integerYear, err := strconv.Atoi(year)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		err = db.PostLivre(c, mongo, db.Book{
+			ID:     id,
+			Author: author,
+			Title:  title,
+			Year:   integerYear,
+			Image:  img,
+		})
+		if err != nil {
+			if err.Error() == "already inserted" {
+				c.JSON(http.StatusConflict, err.Error())
+				return
+			}
+		}
+		c.JSON(http.StatusOK, "ok")
 	})
 
 	r.DELETE("/livres/:id", func(c *gin.Context) {
-		Delete(c.Param("id"))
+		id, got := c.Params.Get("id")
+		if !got {
+			c.JSON(http.StatusInternalServerError, "got error")
+		}
+
+		err := db.DeleteBook(c, id, mongo)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, err.Error())
+		}
+
+		c.JSON(http.StatusOK, "deleted")
+
 	})
 
-	//r.GET("/", homeHandler)
+	r.GET("/", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "index.html", nil)
+	})
+
+	r.GET("/form", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "form.html", nil)
+	})
 
 	r.Run() // listen and serve on localhost:8080
-
 }
-
-//func homeHandler(c *gin.Context) {
-	//err := templates.ExecuteTemplate(c.Writer, "index.html", p)
-	//if err != nil {
-	//	http.Error(w, err.Error(), http.StatusInternalServerError)
-//	}
-//}
